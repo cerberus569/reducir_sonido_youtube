@@ -3,6 +3,8 @@ package com.mauro.data.repository
 import android.content.Context
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import com.mauro.domain.model.VolumeSettings
+import com.mauro.domain.repository.VolumeRepository
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore("settings")

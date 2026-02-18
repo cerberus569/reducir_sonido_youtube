@@ -5,6 +5,7 @@ import androidx.compose.runtime.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.mauro.presentation.VolumeViewModel
 
 @Composable
 fun VolumeScreen(viewModel: VolumeViewModel) {

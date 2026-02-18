@@ -1,47 +1,38 @@
 package com.mauro.readucirsonido
 
+
+
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
+
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mauro.data.repository.VolumeRepositoryImpl
+import com.mauro.domain.usecase.GetVolumeSettingsUseCase
+import com.mauro.domain.usecase.SaveVolumeSettingsUseCase
+import com.mauro.presentation.VolumeViewModel
+import com.mauro.presentation.VolumeViewModelFactory
+import com.mauro.presentation.ui.VolumeScreen // Asegúrate de que este import coincida
 import com.mauro.readucirsonido.ui.theme.Reducir_sonido_youtubeTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+
+        // 1. Instanciar dependencias manualmente
+        val repository = VolumeRepositoryImpl(applicationContext)
+        val getUseCase = GetVolumeSettingsUseCase(repository)
+        val saveUseCase = SaveVolumeSettingsUseCase(repository)
+
+        // 2. Crear el Factory para el ViewModel
+        val viewModelFactory = VolumeViewModelFactory(getUseCase, saveUseCase)
+
         setContent {
             Reducir_sonido_youtubeTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
+                // 3. Llamar a tu pantalla real
+                val vm: VolumeViewModel = viewModel(factory = viewModelFactory)
+                VolumeScreen(viewModel = vm)
             }
         }
-    }
-}
-
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    Reducir_sonido_youtubeTheme {
-        Greeting("Android")
     }
 }
