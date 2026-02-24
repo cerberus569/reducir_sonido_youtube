@@ -58,7 +58,12 @@ class VolumeLimiterService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.getIntExtra("MAX_VOLUME", -1)?.let {
-            if (it >= 0) maxLimit = it
+            if (it >= 0) {
+                maxLimit = it
+                // Actualizar la notificación con el nuevo límite
+                val notificationManager = getSystemService(NotificationManager::class.java)
+                notificationManager.notify(1, createNotification())
+            }
         }
         return START_STICKY
     }
@@ -83,7 +88,7 @@ class VolumeLimiterService : Service() {
         }
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle("Mitigador de Volumen Activo")
-            .setContentText("Controlando el volumen máximo: $maxLimit")
+            .setContentText("Volumen máximo: $maxLimit")
             .setSmallIcon(android.R.drawable.ic_lock_silent_mode)
             .build()
     }

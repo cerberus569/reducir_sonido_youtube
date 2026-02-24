@@ -6,8 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.mauro.domain.model.VolumeSettings
 import com.mauro.domain.usecase.GetVolumeSettingsUseCase
 import com.mauro.domain.usecase.SaveVolumeSettingsUseCase
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class VolumeViewModel(
@@ -21,10 +23,17 @@ class VolumeViewModel(
         VolumeSettings(minVolume = 2, maxVolume = 8, isActive = false)
     )
 
+    // Estado en tiempo real del volumen actual del celular
+    val currentVolume = MutableStateFlow(0)
+
     fun updateSettings(min: Int, max: Int, active: Boolean) {
         viewModelScope.launch {
             saveUseCase(VolumeSettings(minVolume = min, maxVolume = max, isActive = active))
         }
+    }
+
+    fun updateCurrentVolume(volume: Int) {
+        currentVolume.update { volume }
     }
 }
 
