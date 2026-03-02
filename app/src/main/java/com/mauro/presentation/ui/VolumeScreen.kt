@@ -1,20 +1,34 @@
 package com.mauro.presentation.ui
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.os.IBinder
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.mauro.presentation.VolumeViewModel
+import com.mauro.readucirsonido.service.VolumeLimiterService
 
 val AquaGreen = Color(0xFF00BFA5)
 val DarkBg = Color(0xFF121212)
@@ -24,8 +38,56 @@ val CardBg = Color(0xFF1E1E1E)
 fun VolumeScreen(viewModel: VolumeViewModel) {
     val state by viewModel.settings.collectAsState()
     val currentVolume by viewModel.currentVolume.collectAsState()
+    val context = LocalContext.current
 
-    // Animación suave para la barra de volumen actual
+    var peakThreshold by remember { mutableFloatStateOf(0.75f) }
+    var boundService by remember { mutableStateOf<VolumeLimiterService?>(null) }
+
+    // Conectar al servicio para compartir el Visualizer
+    DisposableEffect(state.isActive) {
+        if (state.isActive) {
+            val connection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                    val b = binder as? VolumeLimiterService.LocalBinder
+                    boundService = b?.getService()
+                }
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    boundService = null
+                }
+            }
+            val intent = Intent(context, VolumeLimiterService::class.java)
+            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            onDispose { context.unbindService(connection) }
+        } else {
+            boundService = null
+            onDispose {}
+        }
+    }
+
+    var hasAudioPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasAudioPermission = granted }
+
+    LaunchedEffect(Unit) {
+        if (!hasAudioPermission) permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    LaunchedEffect(peakThreshold) {
+        if (state.isActive) {
+            val intent = Intent(context, VolumeLimiterService::class.java).apply {
+                putExtra("PEAK_THRESHOLD", peakThreshold)
+            }
+            context.startService(intent)
+        }
+    }
+
     val animatedVolume by animateFloatAsState(
         targetValue = currentVolume.toFloat(),
         animationSpec = tween(durationMillis = 300),
@@ -36,7 +98,8 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBg)
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(modifier = Modifier.height(24.dp))
@@ -50,7 +113,24 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Tarjeta que muestra el volumen actual en tiempo real
+        if (hasAudioPermission) {
+            val svc = boundService
+            if (svc != null) {
+                // Servicio activo: usar su Visualizer compartido
+                SpectrumAnalyzer(
+                    peakThreshold = peakThreshold,
+                    externalFft = svc.fftData,
+                    externalWave = svc.waveData,
+                    externalCaptureSize = svc.captureSize
+                )
+            } else {
+                // Servicio apagado: crear Visualizer propio
+                SpectrumAnalyzer(peakThreshold = peakThreshold)
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // Volumen actual
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -60,11 +140,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    "Volumen Actual",
-                    color = Color.Gray,
-                    fontSize = 14.sp
-                )
+                Text("Volumen Actual", color = Color.Gray, fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "$currentVolume / 15",
@@ -73,8 +149,6 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-
-                // Barra visual animada del volumen actual
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -96,7 +170,6 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                             )
                     )
                 }
-
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     when {
@@ -112,9 +185,9 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
-        // Tarjeta del slider de volumen máximo
+        // Volumen máximo
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -132,11 +205,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 Slider(
                     value = state.maxVolume.toFloat(),
                     onValueChange = {
-                        viewModel.updateSettings(
-                            min = 0,
-                            max = it.toInt(),
-                            active = state.isActive
-                        )
+                        viewModel.updateSettings(min = 0, max = it.toInt(), active = state.isActive)
                     },
                     valueRange = 0f..15f,
                     steps = 14,
@@ -151,7 +220,47 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Switch del servicio
+        // Límite de picos
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardBg)
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Límite de Picos", color = Color.White, fontWeight = FontWeight.Medium)
+                    Text(
+                        "${(peakThreshold * 100).toInt()}%",
+                        color = Color(0xFFFF1744),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Si el audio supera este nivel, el volumen baja automáticamente",
+                    color = Color.Gray,
+                    fontSize = 11.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Slider(
+                    value = peakThreshold,
+                    onValueChange = { peakThreshold = it },
+                    valueRange = 0.3f..1.0f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF1744),
+                        activeTrackColor = Color(0xFFFF1744),
+                        inactiveTrackColor = Color(0xFFFF1744).copy(alpha = 0.3f)
+                    )
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Switch servicio
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -175,11 +284,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 Switch(
                     checked = state.isActive,
                     onCheckedChange = {
-                        viewModel.updateSettings(
-                            min = 0,
-                            max = state.maxVolume,
-                            active = it
-                        )
+                        viewModel.updateSettings(min = 0, max = state.maxVolume, active = it)
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = AquaGreen,
@@ -188,5 +293,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
