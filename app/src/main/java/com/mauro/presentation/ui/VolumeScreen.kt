@@ -1,12 +1,8 @@
 package com.mauro.presentation.ui
 
 import android.Manifest
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.os.IBinder
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -41,28 +37,6 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
     val context = LocalContext.current
 
     var peakThreshold by remember { mutableFloatStateOf(0.75f) }
-    var boundService by remember { mutableStateOf<VolumeLimiterService?>(null) }
-
-    // Conectar al servicio para compartir el Visualizer
-    DisposableEffect(state.isActive) {
-        if (state.isActive) {
-            val connection = object : ServiceConnection {
-                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-                    val b = binder as? VolumeLimiterService.LocalBinder
-                    boundService = b?.getService()
-                }
-                override fun onServiceDisconnected(name: ComponentName?) {
-                    boundService = null
-                }
-            }
-            val intent = Intent(context, VolumeLimiterService::class.java)
-            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            onDispose { context.unbindService(connection) }
-        } else {
-            boundService = null
-            onDispose {}
-        }
-    }
 
     var hasAudioPermission by remember {
         mutableStateOf(
@@ -113,20 +87,10 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
+        // Analizador siempre con su propio Visualizer
+        // El servicio maneja su propio Visualizer internamente para controlar volumen
         if (hasAudioPermission) {
-            val svc = boundService
-            if (svc != null) {
-                // Servicio activo: usar su Visualizer compartido
-                SpectrumAnalyzer(
-                    peakThreshold = peakThreshold,
-                    externalFft = svc.fftData,
-                    externalWave = svc.waveData,
-                    externalCaptureSize = svc.captureSize
-                )
-            } else {
-                // Servicio apagado: crear Visualizer propio
-                SpectrumAnalyzer(peakThreshold = peakThreshold)
-            }
+            SpectrumAnalyzer(peakThreshold = peakThreshold)
             Spacer(modifier = Modifier.height(24.dp))
         }
 
