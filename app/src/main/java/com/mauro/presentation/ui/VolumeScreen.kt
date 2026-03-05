@@ -1,8 +1,12 @@
 package com.mauro.presentation.ui
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.IBinder
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -37,6 +41,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
     val context = LocalContext.current
 
     var peakThreshold by remember { mutableFloatStateOf(0.75f) }
+    var boundService by remember { mutableStateOf<VolumeLimiterService?>(null) }
 
     var hasAudioPermission by remember {
         mutableStateOf(
@@ -53,7 +58,31 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
         if (!hasAudioPermission) permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    LaunchedEffect(peakThreshold) {
+    // Conectar al servicio para leer su FFT
+    DisposableEffect(state.isActive) {
+        if (state.isActive) {
+            val connection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                    boundService = (binder as? VolumeLimiterService.LocalBinder)?.getService()
+                }
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    boundService = null
+                }
+            }
+            val intent = Intent(context, VolumeLimiterService::class.java)
+            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            onDispose {
+                try { context.unbindService(connection) } catch (e: Exception) {}
+                boundService = null
+            }
+        } else {
+            boundService = null
+            onDispose {}
+        }
+    }
+
+    // Enviar umbral al servicio cuando cambia
+    LaunchedEffect(peakThreshold, state.isActive) {
         if (state.isActive) {
             val intent = Intent(context, VolumeLimiterService::class.java).apply {
                 putExtra("PEAK_THRESHOLD", peakThreshold)
@@ -87,10 +116,11 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Analizador siempre con su propio Visualizer
-        // El servicio maneja su propio Visualizer internamente para controlar volumen
         if (hasAudioPermission) {
-            SpectrumAnalyzer(peakThreshold = peakThreshold)
+            SpectrumAnalyzer(
+                peakThreshold = peakThreshold,
+                serviceFftFlow = boundService?.fftData
+            )
             Spacer(modifier = Modifier.height(24.dp))
         }
 
@@ -169,7 +199,9 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 Slider(
                     value = state.maxVolume.toFloat(),
                     onValueChange = {
-                        viewModel.updateSettings(min = 0, max = it.toInt(), active = state.isActive)
+                        viewModel.updateSettings(
+                            min = 0, max = it.toInt(), active = state.isActive
+                        )
                     },
                     valueRange = 0f..15f,
                     steps = 14,
@@ -204,7 +236,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Si el audio supera este nivel, el volumen baja automáticamente",
+                    "Superar: baja 10% · Por debajo: sube 5%",
                     color = Color.Gray,
                     fontSize = 11.sp
                 )

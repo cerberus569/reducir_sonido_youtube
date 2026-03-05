@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
@@ -28,10 +29,7 @@ import kotlinx.coroutines.withContext
 fun SpectrumAnalyzer(
     modifier: Modifier = Modifier,
     peakThreshold: Float = 0.75f,
-    // Si el servicio está activo, pasamos sus flows directamente
-    externalFft: kotlinx.coroutines.flow.StateFlow<ByteArray>? = null,
-    externalWave: kotlinx.coroutines.flow.StateFlow<ByteArray>? = null,
-    externalCaptureSize: Int = 0
+    serviceFftFlow: StateFlow<ByteArray>? = null
 ) {
     val bandCount = 32
     var fftData by remember { mutableStateOf(FloatArray(bandCount) { 0f }) }
@@ -40,68 +38,55 @@ fun SpectrumAnalyzer(
     val peaks = remember { FloatArray(bandCount) { 0f } }
     val prevData = remember { FloatArray(bandCount) { 0f } }
 
-    // Modo 1: servicio activo — leer sus flows
-    if (externalFft != null) {
-        val fftBytes by externalFft.collectAsState()
-        val waveBytes by externalWave!!.collectAsState()
+    fun processBytes(fft: ByteArray): FloatArray {
+        val newData = FloatArray(bandCount)
+        if (fft.isEmpty()) return newData
+        val step = maxOf(1, (fft.size / 2) / bandCount)
+        for (i in 0 until bandCount) {
+            val start = i * step
+            var magnitude = 0f
+            var count = 0
+            for (j in start until minOf(start + step, fft.size / 2)) {
+                val idx = j * 2
+                if (idx + 1 < fft.size) {
+                    val real = fft[idx].toFloat()
+                    val imag = fft[idx + 1].toFloat()
+                    magnitude += Math.sqrt(
+                        (real * real + imag * imag).toDouble()
+                    ).toFloat()
+                    count++
+                }
+            }
+            if (count > 0) {
+                val avg = magnitude / count
+                val raw = (Math.log10((avg + 1).toDouble()) /
+                        Math.log10(50.0)).toFloat().coerceIn(0f, 1f)
+                newData[i] = raw * 0.7f + prevData[i] * 0.3f
+            }
+        }
+        return newData
+    }
 
-        LaunchedEffect(fftBytes, waveBytes) {
+    fun updatePeaks(newData: FloatArray) {
+        for (i in 0 until bandCount) {
+            prevData[i] = newData[i]
+            if (newData[i] > peaks[i]) peaks[i] = newData[i]
+            else peaks[i] = (peaks[i] - 0.004f).coerceAtLeast(0f)
+        }
+    }
+
+    if (serviceFftFlow != null) {
+        // Servicio activo: leer FFT del servicio, NO crear Visualizer propio
+        val fftBytes by serviceFftFlow.collectAsState()
+        LaunchedEffect(fftBytes) {
+            if (fftBytes.isEmpty()) return@LaunchedEffect
             hasPermission = true
-            val captureSize = externalCaptureSize
-            if (captureSize == 0) return@LaunchedEffect
-
-            val newData = FloatArray(bandCount)
-            if (fftBytes.isNotEmpty()) {
-                val step = maxOf(1, (fftBytes.size / 2) / bandCount)
-                for (i in 0 until bandCount) {
-                    val start = i * step
-                    var magnitude = 0f
-                    var count = 0
-                    for (j in start until minOf(start + step, fftBytes.size / 2)) {
-                        val idx = j * 2
-                        if (idx + 1 < fftBytes.size) {
-                            val real = fftBytes[idx].toFloat()
-                            val imag = fftBytes[idx + 1].toFloat()
-                            magnitude += Math.sqrt(
-                                (real * real + imag * imag).toDouble()
-                            ).toFloat()
-                            count++
-                        }
-                    }
-                    if (count > 0) {
-                        val avg = magnitude / count
-                        val raw = (Math.log10((avg + 1).toDouble()) /
-                                Math.log10(50.0)).toFloat().coerceIn(0f, 1f)
-                        newData[i] = raw * 0.7f + prevData[i] * 0.3f
-                    }
-                }
-            } else if (waveBytes.isNotEmpty()) {
-                val step = maxOf(1, waveBytes.size / bandCount)
-                for (i in 0 until bandCount) {
-                    var sum = 0f
-                    for (j in 0 until step) {
-                        val idx2 = i * step + j
-                        if (idx2 < waveBytes.size) {
-                            sum += Math.abs((waveBytes[idx2].toInt() and 0xFF) - 128).toFloat()
-                        }
-                    }
-                    val raw = ((sum / step) / 48f).coerceIn(0f, 1f)
-                    newData[i] = raw * 0.7f + prevData[i] * 0.3f
-                }
-            }
-
-            for (i in 0 until bandCount) {
-                prevData[i] = newData[i]
-                if (newData[i] > peaks[i]) {
-                    peaks[i] = newData[i]
-                } else {
-                    peaks[i] = (peaks[i] - 0.004f).coerceAtLeast(0f)
-                }
-            }
+            val newData = processBytes(fftBytes)
+            updatePeaks(newData)
             fftData = newData.copyOf()
         }
     } else {
-        // Modo 2: servicio apagado — crear Visualizer propio
+        // Servicio apagado: crear Visualizer propio solo para visualización
         LaunchedEffect(Unit) {
             withContext(Dispatchers.IO) {
                 var visualizer: Visualizer? = null
@@ -111,7 +96,7 @@ fun SpectrumAnalyzer(
                     visualizer.captureSize = maxSize
                     visualizer.scalingMode = Visualizer.SCALING_MODE_NORMALIZED
                     visualizer.enabled = true
-                    hasPermission = true
+                    withContext(Dispatchers.Main) { hasPermission = true }
 
                     while (isActive) {
                         val fft = ByteArray(maxSize)
@@ -121,29 +106,8 @@ fun SpectrumAnalyzer(
                         val newData = FloatArray(bandCount)
 
                         if (fftResult == Visualizer.SUCCESS) {
-                            val step = maxOf(1, (fft.size / 2) / bandCount)
-                            for (i in 0 until bandCount) {
-                                val start = i * step
-                                var magnitude = 0f
-                                var count = 0
-                                for (j in start until minOf(start + step, fft.size / 2)) {
-                                    val idx = j * 2
-                                    if (idx + 1 < fft.size) {
-                                        val real = fft[idx].toFloat()
-                                        val imag = fft[idx + 1].toFloat()
-                                        magnitude += Math.sqrt(
-                                            (real * real + imag * imag).toDouble()
-                                        ).toFloat()
-                                        count++
-                                    }
-                                }
-                                if (count > 0) {
-                                    val avg = magnitude / count
-                                    val raw = (Math.log10((avg + 1).toDouble()) /
-                                            Math.log10(50.0)).toFloat().coerceIn(0f, 1f)
-                                    newData[i] = raw * 0.7f + prevData[i] * 0.3f
-                                }
-                            }
+                            val processed = processBytes(fft)
+                            processed.copyInto(newData)
                         } else if (waveResult == Visualizer.SUCCESS) {
                             val step = maxOf(1, waveform.size / bandCount)
                             for (i in 0 until bandCount) {
@@ -161,20 +125,17 @@ fun SpectrumAnalyzer(
                             }
                         }
 
-                        for (i in 0 until bandCount) {
-                            prevData[i] = newData[i]
-                            if (newData[i] > peaks[i]) {
-                                peaks[i] = newData[i]
-                            } else {
-                                peaks[i] = (peaks[i] - 0.004f).coerceAtLeast(0f)
-                            }
+                        updatePeaks(newData)
+                        withContext(Dispatchers.Main) {
+                            fftData = newData.copyOf()
                         }
-                        fftData = newData.copyOf()
                         delay(30L)
                     }
                 } catch (e: Exception) {
-                    hasPermission = false
-                    statusMsg = "Error: ${e.javaClass.simpleName}"
+                    withContext(Dispatchers.Main) {
+                        hasPermission = false
+                        statusMsg = "Error: ${e.javaClass.simpleName}"
+                    }
                 } finally {
                     visualizer?.enabled = false
                     visualizer?.release()
@@ -189,16 +150,13 @@ fun SpectrumAnalyzer(
         colors = CardDefaults.cardColors(containerColor = CardBg)
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
-
             Text(
                 "Analizador de Espectro",
                 color = Color.White,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )
-
             Spacer(modifier = Modifier.height(12.dp))
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
@@ -220,20 +178,19 @@ fun SpectrumAnalyzer(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("— línea roja punteada", color = Color.Gray, fontSize = 10.sp)
             }
-
             Spacer(modifier = Modifier.height(16.dp))
 
             if (!hasPermission) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(140.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(statusMsg, color = Color(0xFFFF5252), fontSize = 12.sp)
                 }
             } else {
-                Canvas(
-                    modifier = Modifier.fillMaxWidth().height(160.dp)
-                ) {
+                Canvas(modifier = Modifier.fillMaxWidth().height(160.dp)) {
                     val canvasWidth = size.width
                     val canvasHeight = size.height
                     val totalBarWidth = canvasWidth / bandCount
@@ -306,7 +263,6 @@ fun SpectrumAnalyzer(
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
-
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
