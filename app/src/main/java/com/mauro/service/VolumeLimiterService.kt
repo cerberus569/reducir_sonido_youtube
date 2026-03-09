@@ -40,7 +40,7 @@ class VolumeLimiterService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var visualizer: Visualizer? = null
     private val lastVolumeAction = AtomicLong(0L)
-    private val cooldownMs = 1000L
+    private val cooldownMs = 2000L
     private val energyHistory = ArrayDeque<Float>(10)
 
     // StateFlow público para que la UI lea el FFT
@@ -144,39 +144,50 @@ class VolumeLimiterService : Service() {
             }
         }
 
-        val maxBand = bands.max()
+        // Cuántas bandas superan el umbral
+        val bandsAbove = bands.count { it > peakThreshold }
+        val bandsAbovePct = bandsAbove.toFloat() / bandCount  // 0.0 a 1.0
 
+        // Cuántas bandas tienen audio presente (> ruido de fondo)
+        val bandsWithAudio = bands.count { it > 0.02f }
+        val bandsNearLimit = bands.count { it >= peakThreshold * 0.75f }
+
+        // Guardar energía máxima en historial para detectar silencio
+        val maxBand = bands.max()
         if (energyHistory.size >= 10) energyHistory.removeFirst()
         energyHistory.addLast(maxBand)
-
         if (energyHistory.size < 3) return
 
-        val smoothedMax = energyHistory.average().toFloat()
         val now = System.currentTimeMillis()
         if (now - lastVolumeAction.get() < cooldownMs) return
 
-        val anyAboveLimit = smoothedMax > peakThreshold
-        val allWellBelow = smoothedMax < peakThreshold * 0.30f && smoothedMax > 0.01f
+        // Bajar: 30% o más de bandas superan el umbral
+        val shouldReduce = bandsAbovePct >= 0.30f
 
-        if (anyAboveLimit || allWellBelow) {
+        // Subir: hay audio presente Y menos del 75% de bandas con audio están cerca del límite
+        val audioPresent = bandsWithAudio >= 3
+        val shouldIncrease = audioPresent &&
+                (bandsNearLimit.toFloat() / bandCount) < 0.75f * 0.30f
+
+        if (shouldReduce || shouldIncrease) {
             lastVolumeAction.set(now)
             mainHandler.post {
                 val maxStream = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
-                if (anyAboveLimit) {
+                if (shouldReduce) {
                     val reduction = ((maxStream * 0.10f).toInt()).coerceAtLeast(1)
                     val newVol = (currentVol - reduction).coerceAtLeast(0)
                     if (newVol != currentVol) {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
-                        updateNotification("↓ Volumen reducido: $newVol/$maxStream")
+                        updateNotification("↓ Reducido (${"%.0f".format(bandsAbovePct * 100)}% bandas sobre límite): $newVol/$maxStream")
                     }
-                } else if (allWellBelow) {
-                    val increase = ((maxStream * 0.05f).toInt()).coerceAtLeast(1)
+                } else if (shouldIncrease) {
+                    val increase = ((maxStream * 0.10f).toInt()).coerceAtLeast(1)
                     val newVol = (currentVol + increase).coerceAtMost(maxStream)
                     if (newVol != currentVol) {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
-                        updateNotification("↑ Volumen aumentado: $newVol/$maxStream")
+                        updateNotification("↑ Aumentado: $newVol/$maxStream")
                     }
                 }
             }
