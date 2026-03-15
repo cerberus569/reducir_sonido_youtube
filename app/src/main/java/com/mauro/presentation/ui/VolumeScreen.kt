@@ -1,12 +1,17 @@
 package com.mauro.presentation.ui
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -28,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.mauro.presentation.VolumeViewModel
+import com.mauro.readucirsonido.service.VolumeOverlayService
 import com.mauro.readucirsonido.service.VolumeLimiterService
 
 val AquaGreen = Color(0xFF00BFA5)
@@ -42,6 +48,39 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
     var peakThreshold by remember { mutableFloatStateOf(0.75f) }
     var boundService by remember { mutableStateOf<VolumeLimiterService?>(null) }
+    var overlayEnabled by remember { mutableStateOf(false) }
+
+    // BroadcastReceiver: detecta cuando el usuario toca X en el overlay
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (intent?.action == VolumeOverlayService.ACTION_DISMISS) {
+                    overlayEnabled = false
+                    context.stopService(Intent(context, VolumeOverlayService::class.java))
+                }
+            }
+        }
+        val filter = IntentFilter(VolumeOverlayService.ACTION_DISMISS)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose {
+            try { context.unregisterReceiver(receiver) } catch (e: Exception) {}
+        }
+    }
+
+    // Launcher para pedir permiso SYSTEM_ALERT_WINDOW
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (Settings.canDrawOverlays(context)) {
+            overlayEnabled = true
+            context.startService(Intent(context, VolumeOverlayService::class.java))
+        }
+    }
 
     var hasAudioPermission by remember {
         mutableStateOf(
@@ -256,7 +295,7 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Switch servicio
+        // Switch servicio activo
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -281,6 +320,64 @@ fun VolumeScreen(viewModel: VolumeViewModel) {
                     checked = state.isActive,
                     onCheckedChange = {
                         viewModel.updateSettings(min = 0, max = state.maxVolume, active = it)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = AquaGreen,
+                        checkedTrackColor = AquaGreen.copy(alpha = 0.5f)
+                    )
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Switch overlay flotante
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardBg)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        "Overlay Flotante",
+                        color = Color.White,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        if (overlayEnabled) "Mostrando nivel de volumen" else "Inactivo",
+                        color = if (overlayEnabled) AquaGreen else Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+                Switch(
+                    checked = overlayEnabled,
+                    onCheckedChange = { checked ->
+                        if (checked) {
+                            if (!Settings.canDrawOverlays(context)) {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                )
+                                overlayPermissionLauncher.launch(intent)
+                            } else {
+                                overlayEnabled = true
+                                context.startService(
+                                    Intent(context, VolumeOverlayService::class.java)
+                                )
+                            }
+                        } else {
+                            overlayEnabled = false
+                            context.stopService(
+                                Intent(context, VolumeOverlayService::class.java)
+                            )
+                        }
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = AquaGreen,

@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> <!-- Necesario en Android 13+ -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
 <application
     android:allowBackup="true"
@@ -21,6 +23,13 @@
         android:enabled="true"
         android:exported="false"
         android:foregroundServiceType="mediaPlayback" />
+
+    <!-- Servicio del overlay flotante -->
+    <service
+        android:name=".service.VolumeOverlayService"
+        android:enabled="true"
+        android:exported="false"
+        android:foregroundServiceType="specialUse" />
 
     <activity
         android:name=".MainActivity"

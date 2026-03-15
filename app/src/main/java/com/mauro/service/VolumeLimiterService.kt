@@ -40,10 +40,9 @@ class VolumeLimiterService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var visualizer: Visualizer? = null
     private val lastVolumeAction = AtomicLong(0L)
-    private val cooldownMs = 2500L
+    private val cooldownMs = 800L
     private val energyHistory = ArrayDeque<Float>(10)
 
-    // StateFlow público para que la UI lea el FFT
     private val _fftData = MutableStateFlow(ByteArray(0))
     val fftData: StateFlow<ByteArray> = _fftData
 
@@ -52,6 +51,7 @@ class VolumeLimiterService : Service() {
             val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
             if (currentVol > maxLimit) {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxLimit, 0)
+                notifyOverlay(maxLimit)
             }
         }
     }
@@ -106,7 +106,6 @@ class VolumeLimiterService : Service() {
                 override fun onFftDataCapture(
                     v: Visualizer, fft: ByteArray, samplingRate: Int
                 ) {
-                    // Publicar FFT para que la UI lo lea
                     _fftData.value = fft.copyOf()
                     processFft(fft)
                 }
@@ -147,26 +146,20 @@ class VolumeLimiterService : Service() {
         val maxBand = bands.max()
         if (energyHistory.size >= 10) energyHistory.removeFirst()
         energyHistory.addLast(maxBand)
-        if (energyHistory.size < 5) return
+        if (energyHistory.size < 3) return
 
         val now = System.currentTimeMillis()
         if (now - lastVolumeAction.get() < cooldownMs) return
 
-        // Porcentaje de bandas que superan el umbral
         val bandsAbove = bands.count { it > peakThreshold }
         val bandsAbovePct = bandsAbove.toFloat() / bandCount
-
-        // Energía promedio suavizada de los últimos frames
         val smoothedAvg = energyHistory.average().toFloat()
 
-        // BAJAR: 30%+ de bandas sobre el umbral
         val shouldReduce = bandsAbovePct >= 0.30f
 
-        // SUBIR: solo si el audio está muy tranquilo (promedio bajo el 20% del umbral)
-        // Esto evita subir cuando hay audio normal sonando
         val shouldIncrease = !shouldReduce &&
-                smoothedAvg < peakThreshold * 0.20f &&
-                smoothedAvg > 0.005f  // hay algo de audio, no es silencio total
+                smoothedAvg < peakThreshold * 0.60f &&
+                smoothedAvg > 0.005f
 
         if (!shouldReduce && !shouldIncrease) return
 
@@ -184,21 +177,32 @@ class VolumeLimiterService : Service() {
                         updateNotification(
                             "↓ ${"%.0f".format(bandsAbovePct * 100)}% bandas sobre límite → vol: $newVol/$maxStream"
                         )
+                        notifyOverlay(newVol)
                     }
                 }
                 shouldIncrease -> {
-                    // Solo subir si estamos por debajo del límite máximo configurado
                     if (currentVol < maxLimit) {
                         val increase = ((maxStream * 0.05f).toInt()).coerceAtLeast(1)
                         val newVol = (currentVol + increase).coerceAtMost(maxLimit)
                         if (newVol != currentVol) {
                             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
                             updateNotification("↑ Audio tranquilo → vol: $newVol/$maxStream")
+                            notifyOverlay(newVol)
                         }
                     }
                 }
             }
         }
+    }
+
+    private fun notifyOverlay(volume: Int) {
+        try {
+            val intent = Intent(this, VolumeOverlayService::class.java).apply {
+                action = VolumeOverlayService.ACTION_UPDATE_VOLUME
+                putExtra(VolumeOverlayService.EXTRA_VOLUME, volume)
+            }
+            startService(intent)
+        } catch (e: Exception) { }
     }
 
     private fun updateNotification(text: String) {
