@@ -42,6 +42,8 @@ class VolumeLimiterService : Service() {
     private val lastVolumeAction = AtomicLong(0L)
     private val cooldownMs = 800L
     private val energyHistory = ArrayDeque<Float>(10)
+    private var audioStartTime = 0L
+    private var wasPlaying = false
 
     private val _fftData = MutableStateFlow(ByteArray(0))
     val fftData: StateFlow<ByteArray> = _fftData
@@ -157,9 +159,22 @@ class VolumeLimiterService : Service() {
 
         val shouldReduce = bandsAbovePct >= 0.30f
 
+        val bandsWithAudio = bands.count { it > 0.05f }
+        val audioIsPlaying = bandsWithAudio >= 8
+
+// Detectar cuando el audio arranca
+        if (audioIsPlaying && !wasPlaying) {
+            audioStartTime = System.currentTimeMillis()
+        }
+        wasPlaying = audioIsPlaying
+
+// Solo subir si el audio lleva al menos 3 segundos sonando sin pausa
+        val audioPlayingLongEnough = audioIsPlaying &&
+                (System.currentTimeMillis() - audioStartTime) >= 3000L
+
         val shouldIncrease = !shouldReduce &&
-                smoothedAvg < peakThreshold * 0.60f &&
-                smoothedAvg > 0.005f
+                audioPlayingLongEnough &&
+                smoothedAvg < peakThreshold * 0.60f
 
         if (!shouldReduce && !shouldIncrease) return
 
