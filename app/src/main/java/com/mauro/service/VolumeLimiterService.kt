@@ -44,8 +44,8 @@ class VolumeLimiterService : Service() {
     private val energyHistory = ArrayDeque<Float>(5)
     private var audioStartTime = 0L
     private var wasPlaying = false
+    private var volumeCheckJob: Job? = null
 
-    // Volumen cacheado — se actualiza siempre en hilo principal
     @Volatile private var cachedVolume = 0
 
     private val _fftData = MutableStateFlow(ByteArray(0))
@@ -94,6 +94,50 @@ class VolumeLimiterService : Service() {
                 initVisualizer()
             }
         }
+
+        startVolumeMonitor()
+    }
+
+    private fun startVolumeMonitor() {
+        volumeCheckJob?.cancel()
+        volumeCheckJob = scope.launch {
+            while (isActive) {
+                delay(500L)
+                withContext(Dispatchers.Main) {
+                    val maxStream = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    cachedVolume = currentVol
+
+                    // Límite superior: peakThreshold * volumen máximo del sistema
+                    val upperLimit = (maxStream * peakThreshold).toInt().coerceAtLeast(1)
+                    // Límite inferior: 20% del upperLimit
+                    val lowerLimit = (upperLimit * 0.20f).toInt().coerceAtLeast(0)
+
+                    when {
+                        currentVol > upperLimit -> {
+                            val reduction = ((maxStream * 0.15f).toInt()).coerceAtLeast(1)
+                            val newVol = (currentVol - reduction).coerceAtLeast(0)
+                            if (newVol != currentVol) {
+                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
+                                cachedVolume = newVol
+                                updateNotification("↓ Vol $currentVol > límite $upperLimit → $newVol/$maxStream")
+                                notifyOverlay(newVol)
+                            }
+                        }
+                        currentVol < lowerLimit && currentVol < maxLimit -> {
+                            val increase = ((maxStream * 0.10f).toInt()).coerceAtLeast(1)
+                            val newVol = (currentVol + increase).coerceAtMost(maxLimit)
+                            if (newVol != currentVol) {
+                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
+                                cachedVolume = newVol
+                                updateNotification("↑ Vol $currentVol < mínimo $lowerLimit → $newVol/$maxStream")
+                                notifyOverlay(newVol)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun initVisualizer() {
@@ -104,7 +148,7 @@ class VolumeLimiterService : Service() {
 
             val vis = Visualizer(0)
             vis.captureSize = Visualizer.getCaptureSizeRange()[1]
-            vis.scalingMode = Visualizer.SCALING_MODE_NORMALIZED
+            vis.scalingMode = Visualizer.SCALING_MODE_AS_PLAYED
 
             vis.setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
                 override fun onWaveFormDataCapture(
@@ -162,25 +206,27 @@ class VolumeLimiterService : Service() {
 
         val smoothedPeak = energyHistory.average().toFloat()
 
-        // BAJAR: pico supera el umbral
-        val shouldReduce = instantPeak > peakThreshold ||
-                smoothedPeak > peakThreshold
+        val bandsAboveLimit = bands.count { it > peakThreshold }
+        val bandsAbovePct = bandsAboveLimit.toFloat() / bandCount
 
-        // Detectar si hay audio real sonando
+        val bandsAboveMin = bands.count { it > peakThreshold * 0.20f }
+        val bandsAboveMinPct = bandsAboveMin.toFloat() / bandCount
+
+        // BAJAR: 50% o más de bandas superan el umbral máximo
+        val shouldReduce = bandsAbovePct >= 0.50f
+
         val bandsWithAudio = bands.count { it > 0.02f }
         val audioIsPlaying = bandsWithAudio >= 6
 
-        if (audioIsPlaying && !wasPlaying) {
-            audioStartTime = now
-        }
+        if (audioIsPlaying && !wasPlaying) audioStartTime = now
         wasPlaying = audioIsPlaying
 
-        // SUBIR: audio presente 1 segundo continuo,
-        // pico por debajo del umbral, y volumen actual bajo el límite
         val audioEstablished = audioIsPlaying && (now - audioStartTime) >= 1000L
+
+        // SUBIR: menos del 20% de bandas superan el límite mínimo
         val shouldIncrease = !shouldReduce &&
                 audioEstablished &&
-                smoothedPeak < peakThreshold &&
+                bandsAboveMinPct < 0.20f &&
                 avgAllBands > 0.01f &&
                 cachedVolume < maxLimit
 
@@ -200,7 +246,7 @@ class VolumeLimiterService : Service() {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
                         cachedVolume = newVol
                         updateNotification(
-                            "↓ pico: ${"%.2f".format(instantPeak)} umbral: ${"%.2f".format(peakThreshold)} → vol: $newVol/$maxStream"
+                            "↓ ${(bandsAbovePct * 100).toInt()}% bandas sobre límite → vol: $newVol/$maxStream"
                         )
                         notifyOverlay(newVol)
                     }
@@ -212,7 +258,7 @@ class VolumeLimiterService : Service() {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
                         cachedVolume = newVol
                         updateNotification(
-                            "↑ pico: ${"%.2f".format(smoothedPeak)} umbral: ${"%.2f".format(peakThreshold)} → vol: $newVol/$maxStream"
+                            "↑ ${(bandsAboveMinPct * 100).toInt()}% bandas sobre mínimo → vol: $newVol/$maxStream"
                         )
                         notifyOverlay(newVol)
                     }
@@ -249,6 +295,7 @@ class VolumeLimiterService : Service() {
                 energyHistory.clear()
                 wasPlaying = false
                 audioStartTime = 0L
+                startVolumeMonitor()
             }
         }
         return START_STICKY
@@ -257,6 +304,7 @@ class VolumeLimiterService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
+        volumeCheckJob?.cancel()
         try {
             visualizer?.enabled = false
             visualizer?.release()
