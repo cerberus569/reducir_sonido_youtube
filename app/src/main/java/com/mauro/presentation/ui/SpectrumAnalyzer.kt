@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mauro.domain.util.SpectrumUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -38,35 +39,6 @@ fun SpectrumAnalyzer(
     val peaks = remember { FloatArray(bandCount) { 0f } }
     val prevData = remember { FloatArray(bandCount) { 0f } }
 
-    fun processBytes(fft: ByteArray): FloatArray {
-        val newData = FloatArray(bandCount)
-        if (fft.isEmpty()) return newData
-        val step = maxOf(1, (fft.size / 2) / bandCount)
-        for (i in 0 until bandCount) {
-            val start = i * step
-            var magnitude = 0f
-            var count = 0
-            for (j in start until minOf(start + step, fft.size / 2)) {
-                val idx = j * 2
-                if (idx + 1 < fft.size) {
-                    val real = fft[idx].toFloat()
-                    val imag = fft[idx + 1].toFloat()
-                    magnitude += Math.sqrt(
-                        (real * real + imag * imag).toDouble()
-                    ).toFloat()
-                    count++
-                }
-            }
-            if (count > 0) {
-                val avg = magnitude / count
-                val raw = (Math.log10((avg + 1).toDouble()) /
-                        Math.log10(50.0)).toFloat().coerceIn(0f, 1f)
-                newData[i] = raw * 0.7f + prevData[i] * 0.3f
-            }
-        }
-        return newData
-    }
-
     fun updatePeaks(newData: FloatArray) {
         for (i in 0 until bandCount) {
             prevData[i] = newData[i]
@@ -76,12 +48,15 @@ fun SpectrumAnalyzer(
     }
 
     if (serviceFftFlow != null) {
-        // Servicio activo: leer FFT del servicio, NO crear Visualizer propio
+        // Servicio activo: leer FFT del servicio, NO crear Visualizer propio.
+        // Se usa SpectrumUtils.computeBands, la MISMA fórmula que usa el
+        // servicio para decidir si sube o baja el volumen. Así lo que ves
+        // cruzar la línea roja aquí es exactamente lo que dispara el cambio.
         val fftBytes by serviceFftFlow.collectAsState()
         LaunchedEffect(fftBytes) {
             if (fftBytes.isEmpty()) return@LaunchedEffect
             hasPermission = true
-            val newData = processBytes(fftBytes)
+            val newData = SpectrumUtils.computeBands(fftBytes, bandCount, prevData)
             updatePeaks(newData)
             fftData = newData.copyOf()
         }
@@ -103,12 +78,12 @@ fun SpectrumAnalyzer(
                         val waveform = ByteArray(maxSize)
                         val fftResult = visualizer.getFft(fft)
                         val waveResult = visualizer.getWaveForm(waveform)
-                        val newData = FloatArray(bandCount)
+                        val newData: FloatArray
 
                         if (fftResult == Visualizer.SUCCESS) {
-                            val processed = processBytes(fft)
-                            processed.copyInto(newData)
+                            newData = SpectrumUtils.computeBands(fft, bandCount, prevData)
                         } else if (waveResult == Visualizer.SUCCESS) {
+                            newData = FloatArray(bandCount)
                             val step = maxOf(1, waveform.size / bandCount)
                             for (i in 0 until bandCount) {
                                 var sum = 0f
@@ -123,6 +98,8 @@ fun SpectrumAnalyzer(
                                 val raw = ((sum / step) / 48f).coerceIn(0f, 1f)
                                 newData[i] = raw * 0.7f + prevData[i] * 0.3f
                             }
+                        } else {
+                            newData = FloatArray(bandCount)
                         }
 
                         updatePeaks(newData)
