@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout del repo
         uses: actions/checkout@v4
@@ -38,3 +40,16 @@ jobs:
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      # Además del artefacto de arriba, publicamos el APK como asset de un
+      # Release fijo ("debug-latest"). Esto permite descargarlo con una URL
+      # estable, sin pasar por la sesión web de GitHub Actions.
+      - name: Publicar APK en Release debug-latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete debug-latest --yes || true
+          gh release create debug-latest \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --title "Build debug más reciente" \
+            --notes "Generado automáticamente por build-apk.yml (commit ${{ github.sha }})"
