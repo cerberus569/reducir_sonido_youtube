@@ -19,12 +19,12 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.mauro.data.repository.VolumeRepositoryImpl
 import com.mauro.domain.usecase.GetVolumeSettingsUseCase
+import com.mauro.domain.util.SpectrumUtils
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.sqrt
 
 class VolumeLimiterService : Service() {
 
@@ -39,18 +39,44 @@ class VolumeLimiterService : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
     private var visualizer: Visualizer? = null
+
+    // --- Anti-parpadeo / anti-falso-positivo ---
     private val lastVolumeAction = AtomicLong(0L)
-    private val cooldownMs = 300L
-    private val energyHistory = ArrayDeque<Float>(5)
+    private val cooldownMs = 400L
+    // Cuántas capturas de FFT SEGUIDAS deben cumplir la condición antes de
+    // actuar. Esto evita que un pico aislado (un golpe de batería, un ruido
+    // corto) dispare un cambio de volumen. A la tasa máxima de captura del
+    // Visualizer esto equivale a decidir en base a ~50-80ms de audio sostenido,
+    // no a una sola muestra.
+    private val requiredConsecutive = 3
+    private var consecutiveReduce = 0
+    private var consecutiveIncrease = 0
+
+    // Cuánto sube o baja el volumen por cada detección. Antes esto se
+    // calculaba como porcentaje de maxStream (15 * 0.15 = 2.25 -> 2 al bajar,
+    // pero 15 * 0.10 = 1.5 -> 1 al subir), lo que hacía que bajar y subir NO
+    // fueran simétricos y el resultado de la prueba no coincidiera con lo
+    // esperado (ej.: de nivel 4 bajaba a 2 en vez de a 3). Ahora es siempre
+    // exactamente 1 nivel en cada dirección.
+    private var volumeStep = 1
+
+    private val bandCount = 32
+    private val bands = FloatArray(bandCount)
+
     private var audioStartTime = 0L
     private var wasPlaying = false
-    private var volumeCheckJob: Job? = null
 
     @Volatile private var cachedVolume = 0
 
     private val _fftData = MutableStateFlow(ByteArray(0))
     val fftData: StateFlow<ByteArray> = _fftData
 
+    // Se mantiene como red de seguridad: si algo (otra app, botones físicos)
+    // sube el volumen por encima del máximo configurado, lo vuelve a bajar.
+    // A diferencia de la versión anterior, YA NO hay un segundo bucle que
+    // además intente subir/bajar el volumen mirando el propio nivel de
+    // volumen (sin mirar el audio). Ese bucle competía con la detección de
+    // tonos y podía deshacer o duplicar sus cambios.
     private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean) {
             val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -94,50 +120,6 @@ class VolumeLimiterService : Service() {
                 initVisualizer()
             }
         }
-
-        startVolumeMonitor()
-    }
-
-    private fun startVolumeMonitor() {
-        volumeCheckJob?.cancel()
-        volumeCheckJob = scope.launch {
-            while (isActive) {
-                delay(500L)
-                withContext(Dispatchers.Main) {
-                    val maxStream = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                    cachedVolume = currentVol
-
-                    // Límite superior: peakThreshold * volumen máximo del sistema
-                    val upperLimit = (maxStream * peakThreshold).toInt().coerceAtLeast(1)
-                    // Límite inferior: 20% del upperLimit
-                    val lowerLimit = (upperLimit * 0.20f).toInt().coerceAtLeast(0)
-
-                    when {
-                        currentVol > upperLimit -> {
-                            val reduction = ((maxStream * 0.15f).toInt()).coerceAtLeast(1)
-                            val newVol = (currentVol - reduction).coerceAtLeast(0)
-                            if (newVol != currentVol) {
-                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
-                                cachedVolume = newVol
-                                updateNotification("↓ Vol $currentVol > límite $upperLimit → $newVol/$maxStream")
-                                notifyOverlay(newVol)
-                            }
-                        }
-                        currentVol < lowerLimit && currentVol < maxLimit -> {
-                            val increase = ((maxStream * 0.10f).toInt()).coerceAtLeast(1)
-                            val newVol = (currentVol + increase).coerceAtMost(maxLimit)
-                            if (newVol != currentVol) {
-                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
-                                cachedVolume = newVol
-                                updateNotification("↑ Vol $currentVol < mínimo $lowerLimit → $newVol/$maxStream")
-                                notifyOverlay(newVol)
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     private fun initVisualizer() {
@@ -171,68 +153,53 @@ class VolumeLimiterService : Service() {
     private fun processFft(fft: ByteArray) {
         if (fft.isEmpty()) return
 
-        val bandCount = 32
-        val step = maxOf(1, (fft.size / 2) / bandCount)
-        val bands = FloatArray(bandCount)
+        // Misma fórmula (logarítmica + suavizado) que dibuja las barras en
+        // pantalla: lo que el usuario ve cruzar la línea roja es EXACTAMENTE
+        // lo que se usa para decidir.
+        val newBands = SpectrumUtils.computeBands(fft, bandCount, bands)
+        newBands.copyInto(bands)
 
-        for (i in 0 until bandCount) {
-            val start = i * step
-            var magnitude = 0f
-            var count = 0
-            for (j in start until minOf(start + step, fft.size / 2)) {
-                val idx = j * 2
-                if (idx + 1 < fft.size) {
-                    val real = fft[idx].toFloat()
-                    val imag = fft[idx + 1].toFloat()
-                    magnitude += sqrt(real * real + imag * imag)
-                    count++
-                }
-            }
-            if (count > 0) {
-                val avg = magnitude / count
-                bands[i] = (avg / 128f).coerceIn(0f, 1f)
-            }
-        }
-
-        val instantPeak = bands.max()
         val avgAllBands = bands.average().toFloat()
 
-        if (energyHistory.size >= 5) energyHistory.removeFirst()
-        energyHistory.addLast(instantPeak)
-        if (energyHistory.size < 2) return
-
-        val now = System.currentTimeMillis()
-        if (now - lastVolumeAction.get() < cooldownMs) return
-
-        val smoothedPeak = energyHistory.average().toFloat()
-
+        // BAJAR: 50% o más de las bandas superan la línea roja (peakThreshold)
         val bandsAboveLimit = bands.count { it > peakThreshold }
         val bandsAbovePct = bandsAboveLimit.toFloat() / bandCount
+        val reduceCondition = bandsAbovePct >= 0.50f
 
-        val bandsAboveMin = bands.count { it > peakThreshold * 0.20f }
+        // SUBIR: menos del 20% de las bandas superan el 20% del umbral, con
+        // audio sonando de forma estable (no en silencio ni recién empezando)
+        val minThreshold = peakThreshold * 0.20f
+        val bandsAboveMin = bands.count { it > minThreshold }
         val bandsAboveMinPct = bandsAboveMin.toFloat() / bandCount
-
-        // BAJAR: 50% o más de bandas superan el umbral máximo
-        val shouldReduce = bandsAbovePct >= 0.50f
 
         val bandsWithAudio = bands.count { it > 0.02f }
         val audioIsPlaying = bandsWithAudio >= 6
+        val now = System.currentTimeMillis()
 
         if (audioIsPlaying && !wasPlaying) audioStartTime = now
         wasPlaying = audioIsPlaying
-
         val audioEstablished = audioIsPlaying && (now - audioStartTime) >= 1000L
 
-        // SUBIR: menos del 20% de bandas superan el límite mínimo
-        val shouldIncrease = !shouldReduce &&
+        val increaseCondition = !reduceCondition &&
                 audioEstablished &&
                 bandsAboveMinPct < 0.20f &&
                 avgAllBands > 0.01f &&
                 cachedVolume < maxLimit
 
+        // Histéresis: exigir varias capturas seguidas antes de actuar
+        consecutiveReduce = if (reduceCondition) consecutiveReduce + 1 else 0
+        consecutiveIncrease = if (increaseCondition) consecutiveIncrease + 1 else 0
+
+        val shouldReduce = consecutiveReduce >= requiredConsecutive
+        val shouldIncrease = consecutiveIncrease >= requiredConsecutive
+
         if (!shouldReduce && !shouldIncrease) return
+        if (now - lastVolumeAction.get() < cooldownMs) return
 
         lastVolumeAction.set(now)
+        consecutiveReduce = 0
+        consecutiveIncrease = 0
+
         mainHandler.post {
             val maxStream = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -240,8 +207,7 @@ class VolumeLimiterService : Service() {
 
             when {
                 shouldReduce -> {
-                    val reduction = ((maxStream * 0.15f).toInt()).coerceAtLeast(1)
-                    val newVol = (currentVol - reduction).coerceAtLeast(0)
+                    val newVol = (currentVol - volumeStep).coerceAtLeast(0)
                     if (newVol != currentVol) {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
                         cachedVolume = newVol
@@ -252,8 +218,7 @@ class VolumeLimiterService : Service() {
                     }
                 }
                 shouldIncrease -> {
-                    val increase = ((maxStream * 0.10f).toInt()).coerceAtLeast(1)
-                    val newVol = (currentVol + increase).coerceAtMost(maxLimit)
+                    val newVol = (currentVol + volumeStep).coerceAtMost(maxLimit)
                     if (newVol != currentVol) {
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
                         cachedVolume = newVol
@@ -292,11 +257,14 @@ class VolumeLimiterService : Service() {
         intent?.getFloatExtra("PEAK_THRESHOLD", -1f)?.let {
             if (it >= 0f) {
                 peakThreshold = it
-                energyHistory.clear()
+                consecutiveReduce = 0
+                consecutiveIncrease = 0
                 wasPlaying = false
                 audioStartTime = 0L
-                startVolumeMonitor()
             }
+        }
+        intent?.getIntExtra("VOLUME_STEP", -1)?.let {
+            if (it > 0) volumeStep = it
         }
         return START_STICKY
     }
@@ -304,7 +272,6 @@ class VolumeLimiterService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
-        volumeCheckJob?.cancel()
         try {
             visualizer?.enabled = false
             visualizer?.release()
