@@ -21,11 +21,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Dar permisos de ejecución a gradlew
-        run: chmod +x gradlew
+      # El repo tiene gradle-wrapper.jar excluido por el .gitignore (regla
+      # "*.jar"), así que ./gradlew no puede arrancar. En vez de depender del
+      # wrapper, instalamos Gradle directamente con esta acción y lo usamos
+      # tal cual (misma versión que gradle-wrapper.properties: 8.13).
+      - name: Instalar Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
 
       - name: Compilar APK debug
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
 
       - name: Subir APK como artefacto descargable
         uses: actions/upload-artifact@v4
